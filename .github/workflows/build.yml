@@ -18,10 +18,9 @@ jobs:
         run: gradle -p android assembleDebug -PSERVER_URL="${{ vars.SERVER_URL }}"
       - name: Package zip
         run: |
-          mkdir -p dist/server
-          cp server/package.json server/server.js server/.env.example dist/server/
-          cp -r server/public dist/server/public
-          cp README.md dist/
+          mkdir -p dist
+          rsync -a --exclude node_modules --exclude data.json --exclude .env server/ dist/server/
+          cp README.md dist/ || true
           cp android/app/build/outputs/apk/debug/app-debug.apk dist/VinzChat.apk
           (cd dist && zip -r ../vinzchat-full.zip .)
       - name: Release
