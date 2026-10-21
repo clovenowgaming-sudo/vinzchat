@@ -24,8 +24,9 @@ jobs:
           cp README.md dist/
           cp android/app/build/outputs/apk/debug/app-debug.apk dist/VinzChat.apk
           (cd dist && zip -r ../vinzchat-full.zip .)
-      - uses: actions/upload-artifact@v4
-        with: { name: vinzchat-full, path: vinzchat-full.zip }
       - name: Release
         env: { GH_TOKEN: "${{ github.token }}" }
         run: gh release create "build-${{ github.run_number }}" vinzchat-full.zip dist/VinzChat.apk --title "Build ${{ github.run_number }}" --notes "Server + APK"
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with: { name: vinzchat-full, path: vinzchat-full.zip }
