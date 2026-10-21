@@ -112,6 +112,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (!url.pathname.startsWith('/api/')) return json(res, 404, { error: 'not found' });
     const ip = ipOf(req);
+    if (url.pathname === "/api/ping") return json(res, 200, { ok: true });
 
     if (req.method === 'POST' && url.pathname === '/api/register') {
       const n = normPhone((await body(req)).phone);
@@ -210,3 +211,4 @@ wss.on('connection', ws => {
 });
 
 server.listen(PORT, () => console.log(`Vinz Chat jalan di :${PORT} (OTP: ${PROVIDER})`));
+if (process.env.NGROK_DOMAIN) require('./tunnel');

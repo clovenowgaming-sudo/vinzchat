@@ -1,0 +1,11 @@
+<resources>
+    <color name="bg">#0E1621</color>
+    <color name="surface">#17212E</color>
+    <color name="primary">#2B7FFF</color>
+    <color name="text">#E8EEF6</color>
+    <color name="sub">#8A99AD</color>
+    <color name="line">#263548</color>
+    <color name="error">#E5484D</color>
+    <color name="bubble_me">#2B7FFF</color>
+    <color name="bubble_other">#1F2B3A</color>
+</resources>

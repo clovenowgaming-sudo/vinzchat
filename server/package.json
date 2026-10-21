@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "main": "server.js",
-  "scripts": { "start": "node --env-file=.env server.js" },
-  "dependencies": { "ws": "^8.18.0" }
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "ngrok": "^5.0.0-beta.2",
+    "ws": "^8.18.0"
+  }
 }
