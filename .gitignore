@@ -1,0 +1,9 @@
+node_modules/
+data.json
+.env
+android/.gradle/
+android/build/
+android/app/build/
+local.properties
+dist/
+*.zip

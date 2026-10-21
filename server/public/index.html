@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vinz Chat</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:#111;color:#eee;height:100vh}
+section{height:100%;display:flex;flex-direction:column;padding:16px;gap:10px}
+section[hidden]{display:none}
+input,button{font-size:16px;padding:12px;border-radius:10px;border:1px solid #333;background:#1c1c1c;color:#eee}
+button{background:#2b7fff;border:0;color:#fff;font-weight:600}
+.err{color:#ff6b6b;min-height:1.2em}
+.row{display:flex;gap:8px}.row input{flex:1;min-width:0}
+.c{padding:14px;border-bottom:1px solid #222;cursor:pointer}
+.c b{color:#2b7fff}
+#msgs{flex:1;overflow:auto;display:flex;flex-direction:column;gap:6px}
+.m{max-width:80%;padding:8px 12px;border-radius:14px;background:#222;word-wrap:break-word}
+.m.me{align-self:flex-end;background:#2b7fff}
+h2{margin:0}
+</style></head><body>
+<section id="login"><h2>Vinz Chat</h2><p>Masukkan nomor HP (contoh 0812xxxx atau +62812xxxx)</p>
+<input id="ph" type="tel" placeholder="Nomor HP"><button onclick="reg()">Kirim OTP</button><div class="err" id="e1"></div></section>
+<section id="otp" hidden><h2>Verifikasi</h2><p>Masukkan 6 digit kode OTP</p>
+<input id="code" inputmode="numeric" maxlength="6" placeholder="000000"><button onclick="ver()">Verifikasi</button><div class="err" id="e2"></div></section>
+<section id="list" hidden><div class="row"><h2 style="flex:1">Chat</h2><button onclick="logout()" style="background:#333">Keluar</button></div>
+<div class="row"><input id="add" type="tel" placeholder="Tambah nomor"><button onclick="addC()">+</button></div>
+<div class="err" id="e3"></div><div id="cl" style="overflow:auto"></div></section>
+<section id="chat" hidden><div class="row"><button onclick="back()" style="background:#333">&lt;</button><h2 id="who" style="flex:1;align-self:center"></h2></div>
+<div id="msgs"></div><div class="row"><input id="tx" placeholder="Pesan" onkeydown="if(event.key=='Enter')send()"><button onclick="send()">Kirim</button></div></section>
+<script>
+const $=s=>document.querySelector(s);
+let token=localStorage.t||'',me=localStorage.me||'',phone='',ws,cur='',contacts=[],msgs={},unread={};
+async function api(p,o={}){
+  const r=await fetch('/api/'+p,{...o,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})}});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j;}
+const show=id=>document.querySelectorAll('section').forEach(s=>s.hidden=s.id!==id);
+async function reg(){$('#e1').textContent='';try{phone=$('#ph').value.trim();await api('register',{method:'POST',body:JSON.stringify({phone})});show('otp')}catch(e){$('#e1').textContent=e.message}}
+async function ver(){$('#e2').textContent='';try{const r=await api('verify',{method:'POST',body:JSON.stringify({phone,code:$('#code').value.trim()})});
+  token=r.token;me=r.phone;localStorage.t=token;localStorage.me=me;start()}catch(e){$('#e2').textContent=e.message}}
+async function start(){if(!token)return show('login');
+  try{contacts=(await api('contacts')).contacts}catch{return logout(true)}
+  renderList();show('list');connect()}
+function logout(skip){if(!skip&&token)api('logout',{method:'POST'}).catch(()=>{});token='';localStorage.clear();if(ws)ws.close();show('login')}
+function renderList(){const cl=$('#cl');cl.textContent='';contacts.forEach(p=>{const d=document.createElement('div');d.className='c';d.textContent=p;
+  if(unread[p]){const b=document.createElement('b');b.textContent='  ('+unread[p]+')';d.appendChild(b)}d.onclick=()=>openChat(p);cl.appendChild(d)})}
+async function addC(){$('#e3').textContent='';try{const r=await api('contacts',{method:'POST',body:JSON.stringify({phone:$('#add').value.trim()})});
+  if(!contacts.includes(r.phone))contacts.push(r.phone);$('#add').value='';renderList()}catch(e){$('#e3').textContent=e.message}}
+async function openChat(p){cur=p;unread[p]=0;$('#who').textContent=p;show('chat');
+  msgs[p]=(await api('history?with='+encodeURIComponent(p))).messages;renderMsgs()}
+function back(){cur='';renderList();show('list')}
+function renderMsgs(){const box=$('#msgs');box.textContent='';(msgs[cur]||[]).forEach(m=>{const d=document.createElement('div');
+  d.className='m'+(m.from===me?' me':'');d.textContent=m.text;box.appendChild(d)});box.scrollTop=box.scrollHeight}
+function send(){const t=$('#tx').value.trim();if(!t||!ws||ws.readyState!==1)return;ws.send(JSON.stringify({to:cur,text:t}));$('#tx').value=''}
+function connect(){if(ws)ws.onclose=null,ws.close();
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?token='+token);
+  ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type!=='msg')return;const peer=m.from===me?m.to:m.from;
+    (msgs[peer]=msgs[peer]||[]).push(m);if(!contacts.includes(peer))contacts.push(peer);
+    if(peer===cur)renderMsgs();else{unread[peer]=(unread[peer]||0)+1;renderList()}};
+  ws.onclose=()=>{if(token)setTimeout(connect,2000)}}
+start();
+</script></body></html>

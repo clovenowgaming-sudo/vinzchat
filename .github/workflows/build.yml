@@ -1,0 +1,31 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.7' }
+      - name: Build APK
+        run: gradle -p android assembleDebug -PSERVER_URL="${{ vars.SERVER_URL }}"
+      - name: Package zip
+        run: |
+          mkdir -p dist/server
+          cp server/package.json server/server.js server/.env.example dist/server/
+          cp -r server/public dist/server/public
+          cp README.md dist/
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/VinzChat.apk
+          (cd dist && zip -r ../vinzchat-full.zip .)
+      - uses: actions/upload-artifact@v4
+        with: { name: vinzchat-full, path: vinzchat-full.zip }
+      - name: Release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release create "build-${{ github.run_number }}" vinzchat-full.zip dist/VinzChat.apk --title "Build ${{ github.run_number }}" --notes "Server + APK"
