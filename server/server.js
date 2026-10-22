@@ -70,7 +70,7 @@ async function sendOtp(n) {
   } else {
     const code = crypto.randomInt(0, 1e6).toString().padStart(6, '0');
     entry.hash = sha(code);
-    console.log('[DEV OTP]', n.phone, code);
+    if (PROVIDER === 'sms') await require('./sms').sendOtpSms(n.phone, code); else console.log('[DEV OTP]', n.phone, code);
   }
   pending.set(n.phone, entry);
 }
@@ -85,7 +85,7 @@ async function checkOtp(n, code, entry) {
 
 // ---------- http helpers ----------
 const json = (res, c, o) => { res.writeHead(c, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
-const ipOf = req => req.headers['cf-connecting-ip'] || req.socket.remoteAddress;
+const ipOf = req => req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
 function body(req) {
   return new Promise((ok, no) => {
     let s = '';
