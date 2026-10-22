@@ -9,6 +9,10 @@ const MC_BASE = 'https://cpaas.messagecentral.com';
 const MC_ID = process.env.MC_CUSTOMER_ID, MC_PW = process.env.MC_PASSWORD;
 const MC_EMAIL = process.env.MC_EMAIL, MC_COUNTRY = process.env.MC_COUNTRY || '62';
 const DB_FILE = path.join(__dirname, 'data.json');
+const { pipeline } = require('stream/promises');
+const { Transform } = require('stream');
+const UP_DIR = path.join(__dirname, 'uploads');
+const MAX_UP = (+process.env.MAX_UPLOAD_MB || 25) * 1048576;
 
 // ---------- storage (JSON file, atomic write) ----------
 let db = { users: {}, sessions: {}, contacts: {}, messages: [] };
@@ -70,7 +74,7 @@ async function sendOtp(n) {
   } else {
     const code = crypto.randomInt(0, 1e6).toString().padStart(6, '0');
     entry.hash = sha(code);
-    if (PROVIDER === 'sms') await require('./sms').sendOtpSms(n.phone, code); else console.log('[DEV OTP]', n.phone, code);
+    console.log('[DEV OTP]', n.phone, code);
   }
   pending.set(n.phone, entry);
 }
@@ -85,7 +89,7 @@ async function checkOtp(n, code, entry) {
 
 // ---------- http helpers ----------
 const json = (res, c, o) => { res.writeHead(c, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
-const ipOf = req => req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
+const ipOf = req => req.headers['cf-connecting-ip'] || req.socket.remoteAddress;
 function body(req) {
   return new Promise((ok, no) => {
     let s = '';
@@ -142,6 +146,42 @@ const server = http.createServer(async (req, res) => {
 
     const me = authPhone(req, url);
     if (!me) return json(res, 401, { error: 'Belum login' });
+
+    if (req.method === 'POST' && url.pathname === '/api/upload') {
+      const to = normPhone(url.searchParams.get('to'));
+      const name = path.basename(String(url.searchParams.get('name') || 'file')).replace(/[^\w.\- ()]/g, '_').slice(0, 100) || 'file';
+      const mime = String(url.searchParams.get('type') || 'application/octet-stream').slice(0, 100);
+      if (!to || !db.users[to.phone]) return json(res, 404, { error: 'Nomor tujuan belum terdaftar' });
+      if (!hit('up:' + me, 20, 3600e3)) return json(res, 429, { error: 'Terlalu banyak upload, coba lagi nanti' });
+      const len = +req.headers['content-length'] || 0;
+      if (!len || len > MAX_UP) return json(res, 413, { error: 'Ukuran file maksimal ' + Math.floor(MAX_UP / 1048576) + ' MB' });
+      const id = crypto.randomUUID();
+      fs.mkdirSync(UP_DIR, { recursive: true });
+      const fp = path.join(UP_DIR, id);
+      let size = 0;
+      const cap = new Transform({ transform(ch, enc, cb) { size += ch.length; size > MAX_UP ? cb(new Error('too big')) : cb(null, ch); } });
+      try { await pipeline(req, cap, fs.createWriteStream(fp)); }
+      catch (e) { fs.unlink(fp, () => {}); return json(res, 413, { error: 'Upload gagal atau terlalu besar' }); }
+      const msg = { type: 'msg', id: crypto.randomUUID(), from: me, to: to.phone, text: '', file: { id, name, mime, size }, ts: Date.now() };
+      db.messages.push(msg);
+      const cl = db.contacts[to.phone] = db.contacts[to.phone] || [];
+      if (!cl.includes(me)) cl.push(me);
+      save();
+      push(me, msg); push(to.phone, msg);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && url.pathname.startsWith('/api/file/')) {
+      const fid = path.basename(url.pathname.slice(10));
+      const m = db.messages.find(x => x.file && x.file.id === fid);
+      if (!m || (m.from !== me && m.to !== me)) return json(res, 404, { error: 'File tidak ditemukan' });
+      const fp = path.join(UP_DIR, fid);
+      return fs.stat(fp, (e, st) => {
+        if (e) return json(res, 404, { error: 'File sudah dihapus' });
+        res.writeHead(200, { 'Content-Type': m.file.mime, 'Content-Length': st.size, 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(m.file.name) });
+        fs.createReadStream(fp).pipe(res);
+      });
+    }
 
     if (req.method === 'GET' && url.pathname === '/api/contacts')
       return json(res, 200, { contacts: db.contacts[me] || [] });

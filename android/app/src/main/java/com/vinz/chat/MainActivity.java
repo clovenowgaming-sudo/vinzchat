@@ -372,6 +372,11 @@ public class MainActivity extends Activity {
         final EditText in = input("Pesan", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         Button send = button("Kirim");
         send.setOnClickListener(x -> send(in));
+        Button att = button("+");
+        att.setOnClickListener(x -> pick());
+        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(WRAP, MATCH);
+        ap.rightMargin = dp(8);
+        bar.addView(att, ap);
         bar.addView(in, new LinearLayout.LayoutParams(0, WRAP, 1f));
         LinearLayout.LayoutParams sp2 = new LinearLayout.LayoutParams(WRAP, MATCH);
         sp2.leftMargin = dp(8);
@@ -389,7 +394,9 @@ public class MainActivity extends Activity {
         int maxW = (int) (getResources().getDisplayMetrics().widthPixels * 0.78);
         for (JSONObject m : list) {
             boolean mine = m.optString("from").equals(me);
-            TextView t = tv(m.optString("text"), 15, mine ? 0xFFFFFFFF : c(R.color.text), false);
+            final JSONObject fm = m.optJSONObject("file");
+            TextView t = tv(fm != null ? fileLabel(fm) : m.optString("text"), 15, mine ? 0xFFFFFFFF : c(R.color.text), false);
+            if (fm != null) t.setOnClickListener(x -> Xfer.download(MainActivity.this, token, fm));
             t.setMaxWidth(maxW);
             t.setPadding(dp(12), dp(8), dp(12), dp(8));
             t.setBackground(box(c(mine ? R.color.bubble_me : R.color.bubble_other), 0));
@@ -443,6 +450,37 @@ public class MainActivity extends Activity {
                 renderList();
             }
         } catch (JSONException ignored) {}
+    }
+
+    // ---------- file ----------
+    JSONObject pendingFile;
+
+    void pick() {
+        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        startActivityForResult(i, 77);
+    }
+
+    @Override protected void onActivityResult(int req, int res, android.content.Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req == 77 && res == RESULT_OK && data != null && data.getData() != null && !cur.isEmpty())
+            Xfer.upload(this, token, cur, data.getData());
+    }
+
+    @Override public void onRequestPermissionsResult(int rc, String[] perms, int[] grants) {
+        super.onRequestPermissionsResult(rc, perms, grants);
+        if (rc != 78) return;
+        if (grants.length > 0 && grants[0] == android.content.pm.PackageManager.PERMISSION_GRANTED && pendingFile != null)
+            Xfer.download(this, token, pendingFile);
+        else Toast.makeText(this, "Izin penyimpanan ditolak, file tidak bisa disimpan.", Toast.LENGTH_LONG).show();
+        pendingFile = null;
+    }
+
+    String fileLabel(JSONObject f) {
+        String mime = f.optString("mime");
+        String kind = mime.startsWith("image/") ? "Foto" : mime.startsWith("video/") ? "Video" : "File";
+        return kind + ": " + f.optString("name") + "\n" + Xfer.size(f.optLong("size")) + "  -  ketuk untuk unduh";
     }
 
     // ---------- websocket ----------

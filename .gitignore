@@ -7,3 +7,4 @@ android/app/build/
 local.properties
 dist/
 *.zip
+server/uploads/
