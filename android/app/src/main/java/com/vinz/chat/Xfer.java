@@ -3,11 +3,17 @@ package com.vinz.chat;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.util.LruCache;
+import android.widget.ImageView;
 import android.widget.Toast;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -26,6 +32,10 @@ public class Xfer {
     static final OkHttpClient C = Api.C.newBuilder()
         .writeTimeout(120, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS).build();
 
+    static final LruCache<String, Bitmap> MEM = new LruCache<String, Bitmap>(24 * 1024 * 1024) {
+        @Override protected int sizeOf(String k, Bitmap b) { return b.getByteCount(); }
+    };
+
     static void toast(final MainActivity a, final String m) {
         a.runOnUiThread(() -> Toast.makeText(a, m, Toast.LENGTH_LONG).show());
     }
@@ -36,8 +46,12 @@ public class Xfer {
         return String.format(java.util.Locale.US, "%.1f MB", b / 1048576.0);
     }
 
-    static void upload(final MainActivity a, final String token, final String to, final Uri uri) {
-        toast(a, "Mengirim file...");
+    static void upload(MainActivity a, String token, String to, Uri uri) { send(a, token, to, uri, false); }
+
+    static void uploadStatus(MainActivity a, String token, Uri uri) { send(a, token, null, uri, true); }
+
+    static void send(final MainActivity a, final String token, final String to, final Uri uri, final boolean status) {
+        toast(a, status ? "Memposting status..." : "Mengirim file...");
         new Thread(() -> {
             try {
                 final ContentResolver cr = a.getContentResolver();
@@ -71,18 +85,23 @@ public class Xfer {
                         } finally { in.close(); }
                     }
                 };
-                String url = Api.base() + "/api/upload?to=" + Uri.encode(to) + "&name=" + Uri.encode(name) + "&type=" + Uri.encode(m);
+                String url = status
+                    ? Api.base() + "/api/status/media?name=" + Uri.encode(name) + "&type=" + Uri.encode(m)
+                    : Api.base() + "/api/upload?to=" + Uri.encode(to) + "&name=" + Uri.encode(name) + "&type=" + Uri.encode(m);
                 Request req = new Request.Builder().url(url).header("Authorization", "Bearer " + token).post(body).build();
                 try (Response r = C.newCall(req).execute()) {
                     String s = r.body() != null ? r.body().string() : "";
                     if (!r.isSuccessful()) {
-                        String err = "Gagal mengirim file (" + r.code() + ")";
+                        String err = "Gagal mengirim (" + r.code() + ")";
                         try { err = new JSONObject(s).optString("error", err); } catch (Exception ignored) {}
                         toast(a, err);
+                    } else if (status) {
+                        toast(a, "Status terposting");
+                        a.runOnUiThread(a::loadStatus);
                     }
                 }
             } catch (Exception e) {
-                toast(a, "Tidak terhubung ke server. File tidak terkirim.");
+                toast(a, "Tidak terhubung ke server. Tidak terkirim.");
             }
         }).start();
     }
@@ -133,6 +152,55 @@ public class Xfer {
                 String msg = e.getMessage();
                 toast(a, msg != null && msg.startsWith("Gagal") ? msg : "Gagal mengunduh. Periksa koneksi.");
             }
+        }).start();
+    }
+
+    static void loadImage(final MainActivity a, final String token, final String id, final ImageView iv, final int targetW) {
+        final String key = id + "@" + targetW;
+        Bitmap cached = MEM.get(key);
+        if (cached != null) { iv.setImageBitmap(cached); return; }
+        new Thread(() -> {
+            try {
+                File f = new File(a.getCacheDir(), "f_" + id);
+                if (!f.exists()) {
+                    Request req = new Request.Builder().url(Api.base() + "/api/file/" + id)
+                        .header("Authorization", "Bearer " + token).build();
+                    try (Response r = C.newCall(req).execute()) {
+                        if (!r.isSuccessful() || r.body() == null) return;
+                        File tmp = new File(a.getCacheDir(), "t_" + id);
+                        FileOutputStream os = new FileOutputStream(tmp);
+                        InputStream in = r.body().byteStream();
+                        try {
+                            byte[] buf = new byte[16384];
+                            int n;
+                            while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                        } finally { in.close(); os.close(); }
+                        tmp.renameTo(f);
+                    }
+                }
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(f.getPath(), o);
+                int s = 1;
+                while (o.outWidth / (s * 2) >= targetW) s *= 2;
+                o.inJustDecodeBounds = false;
+                o.inSampleSize = s;
+                Bitmap bm = BitmapFactory.decodeFile(f.getPath(), o);
+                if (bm == null) return;
+                int rot = 0;
+                try {
+                    int ori = new ExifInterface(f.getPath()).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
+                    rot = ori == 6 ? 90 : ori == 3 ? 180 : ori == 8 ? 270 : 0;
+                } catch (Exception ignored) {}
+                if (rot != 0) {
+                    Matrix mx = new Matrix();
+                    mx.postRotate(rot);
+                    bm = Bitmap.createBitmap(bm, 0, 0, bm.getWidth(), bm.getHeight(), mx, true);
+                }
+                final Bitmap out = bm;
+                MEM.put(key, out);
+                a.runOnUiThread(() -> iv.setImageBitmap(out));
+            } catch (Exception ignored) {}
         }).start();
     }
 }

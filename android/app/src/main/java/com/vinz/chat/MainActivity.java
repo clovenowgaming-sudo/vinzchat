@@ -15,12 +15,15 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.VideoView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
@@ -166,6 +169,7 @@ public class MainActivity extends Activity {
     @Override public void onBackPressed() {
         if (screen.equals("chat")) showList();
         else if (screen.equals("otp")) showLogin(null);
+        else if (screen.equals("status") || screen.equals("addc")) showList();
         else super.onBackPressed();
     }
 
@@ -183,6 +187,7 @@ public class MainActivity extends Activity {
                 contacts.clear();
                 JSONArray a = j2.optJSONArray("contacts");
                 if (a != null) for (int i = 0; i < a.length(); i++) contacts.add(a.optString(i));
+                loadContactMeta(j2);
                 showList();
                 connectWs();
             }));
@@ -235,7 +240,7 @@ public class MainActivity extends Activity {
         l.setPadding(dp(24), dp(24), dp(24), dp(24));
         l.addView(tv("Vinz Chat", 28, c(R.color.primary), true));
         l.addView(tv("Masukkan nomor HP kamu. Kode OTP 6 digit akan dikirim lewat SMS.", 14, c(R.color.sub), false), lp(0, 8, 0, 16));
-        final EditText ph = input("0812xxxxxxxx", InputType.TYPE_CLASS_PHONE);
+        final EditText ph = input("0812... atau +14155550123", InputType.TYPE_CLASS_PHONE);
         ph.setText(phone);
         l.addView(ph, lp(0, 0, 0, 8));
         final TextView er = tv(err == null ? "" : err, 13, c(R.color.error), false);
@@ -287,7 +292,7 @@ public class MainActivity extends Activity {
         l.addView(back, lp(0, 0, 0, 0));
         setScreen("otp", l);
     }
-    void showList() {
+    void showListOld() {
         LinearLayout l = col();
         l.addView(topBar(null, null, "Vinz Chat", "Keluar", this::logout), new LinearLayout.LayoutParams(MATCH, WRAP));
         LinearLayout row = new LinearLayout(this);
@@ -328,7 +333,7 @@ public class MainActivity extends Activity {
         if (listBox == null || !screen.equals("list")) return;
         listBox.removeAllViews();
         if (contacts.isEmpty()) {
-            TextView t = tv("Belum ada kontak. Tambah nomor yang sudah terdaftar di Vinz Chat.", 14, c(R.color.sub), false);
+            TextView t = tv("Belum ada kontak. Tekan + Kontak untuk menyimpan nomor.", 14, c(R.color.sub), false);
             t.setPadding(dp(16), dp(24), dp(16), dp(24));
             listBox.addView(t);
             return;
@@ -338,7 +343,7 @@ public class MainActivity extends Activity {
             r.setGravity(Gravity.CENTER_VERTICAL);
             r.setPadding(dp(16), dp(16), dp(16), dp(16));
             r.setBackground(box(c(R.color.bg), c(R.color.line)));
-            r.addView(tv(p, 16, c(R.color.text), false), new LinearLayout.LayoutParams(0, WRAP, 1f));
+            r.addView(tv(label(p), 16, c(R.color.text), false), new LinearLayout.LayoutParams(0, WRAP, 1f));
             Integer n = unread.get(p);
             if (n != null && n > 0) {
                 TextView b = tv(String.valueOf(n), 12, 0xFFFFFFFF, true);
@@ -351,6 +356,7 @@ public class MainActivity extends Activity {
         }
     }
     void openChat(String p) {
+        refreshMeta();
         unread.remove(p);
         showChat(p);
         renderMsgs();
@@ -359,7 +365,7 @@ public class MainActivity extends Activity {
     void showChat(String p) {
         cur = p;
         LinearLayout l = col();
-        l.addView(topBar("<", this::showList, p, null, null), new LinearLayout.LayoutParams(MATCH, WRAP));
+        l.addView(topBar("<", this::showList, nameOf(p), null, null), new LinearLayout.LayoutParams(MATCH, WRAP));
         ScrollView sv = new ScrollView(this);
         LinearLayout bx = new LinearLayout(this);
         bx.setOrientation(LinearLayout.VERTICAL);
@@ -395,6 +401,13 @@ public class MainActivity extends Activity {
         for (JSONObject m : list) {
             boolean mine = m.optString("from").equals(me);
             final JSONObject fm = m.optJSONObject("file");
+            if (fm != null) {
+                LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(WRAP, WRAP);
+                fp.gravity = mine ? Gravity.END : Gravity.START;
+                fp.setMargins(dp(8), dp(3), dp(8), dp(3));
+                msgBox.addView(fileBubble(fm, mine, maxW), fp);
+                continue;
+            }
             TextView t = tv(fm != null ? fileLabel(fm) : m.optString("text"), 15, mine ? 0xFFFFFFFF : c(R.color.text), false);
             if (fm != null) t.setOnClickListener(x -> Xfer.download(MainActivity.this, token, fm));
             t.setMaxWidth(maxW);
@@ -410,6 +423,7 @@ public class MainActivity extends Activity {
 
     // ---------- chat logic ----------
     void send(EditText in) {
+        if (unreg.contains(cur)) { Toast.makeText(this, "Nomor ini belum terdaftar di Vinz Chat.", Toast.LENGTH_SHORT).show(); return; }
         String t = in.getText().toString().trim();
         if (t.isEmpty()) return;
         if (ws != null && wsUp && ws.send(json("to", cur, "text", t).toString())) in.setText("");
@@ -455,6 +469,340 @@ public class MainActivity extends Activity {
     // ---------- file ----------
     JSONObject pendingFile;
 
+    // ---------- kontak, preview, status ----------
+    static final int[] BG = {0xFF1E6BFF, 0xFF0B8457, 0xFFB3261E, 0xFF6A1B9A, 0xFFE65100, 0xFF37474F};
+    HashMap<String, String> names = new HashMap<>();
+    HashSet<String> unreg = new HashSet<>();
+    ArrayList<JSONObject> statuses = new ArrayList<>();
+    LinearLayout stBox;
+    int stBg = 0;
+
+    String nameOf(String p) {
+        String n = names.get(p);
+        return (n == null || n.isEmpty()) ? p : n;
+    }
+
+    String label(String p) {
+        String n = names.get(p);
+        String suf = unreg.contains(p) ? "  (belum terdaftar)" : "";
+        return (n == null || n.isEmpty()) ? p + suf : n + "\n" + p + suf;
+    }
+
+    void loadContactMeta(JSONObject j) {
+        if (j == null) return;
+        JSONArray a = j.optJSONArray("list");
+        if (a == null) return;
+        names.clear();
+        unreg.clear();
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject o = a.optJSONObject(i);
+            if (o == null) continue;
+            String p = o.optString("phone");
+            String n = o.optString("name");
+            if (!n.isEmpty()) names.put(p, n);
+            if (!o.optBoolean("registered")) unreg.add(p);
+            if (!contacts.contains(p)) contacts.add(p);
+        }
+    }
+
+    void refreshMeta() {
+        Api.call("GET", "contacts", token, null, (cd, j, net) -> ui(() -> {
+            if (cd == 200 && j != null) { loadContactMeta(j); renderList(); }
+        }));
+    }
+
+    String timeAgo(long ts) {
+        long m = (System.currentTimeMillis() - ts) / 60000;
+        if (m < 1) return "baru saja";
+        if (m < 60) return m + " menit lalu";
+        return (m / 60) + " jam lalu";
+    }
+
+    void showList() {
+        LinearLayout l = col();
+        l.addView(topBar(null, null, "Vinz Chat", "Keluar", this::logout), new LinearLayout.LayoutParams(MATCH, WRAP));
+        LinearLayout hr = new LinearLayout(this);
+        hr.setPadding(dp(10), dp(10), dp(10), dp(6));
+        Button st = button("Status");
+        st.setOnClickListener(x -> showStatus());
+        Button ac = button("+ Kontak");
+        ac.setOnClickListener(x -> showAddContact(null));
+        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+        hp.rightMargin = dp(6);
+        hr.addView(st, hp);
+        hr.addView(ac, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        l.addView(hr, new LinearLayout.LayoutParams(MATCH, WRAP));
+        ScrollView sv = new ScrollView(this);
+        LinearLayout lb = new LinearLayout(this);
+        lb.setOrientation(LinearLayout.VERTICAL);
+        sv.addView(lb, new ViewGroup.LayoutParams(MATCH, WRAP));
+        l.addView(sv, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+        setScreen("list", l);
+        listBox = lb;
+        renderList();
+    }
+
+    void showAddContact(String err) {
+        LinearLayout l = col();
+        l.addView(topBar("<", this::showList, "Tambah kontak", null, null), new LinearLayout.LayoutParams(MATCH, WRAP));
+        LinearLayout f = new LinearLayout(this);
+        f.setOrientation(LinearLayout.VERTICAL);
+        f.setPadding(dp(16), dp(16), dp(16), dp(16));
+        final EditText nm = input("Nama (boleh kosong)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        final EditText ph = input("Nomor, mis. 0812... atau +14155550123", InputType.TYPE_CLASS_PHONE);
+        f.addView(nm, lp(0, 0, 0, 8));
+        f.addView(ph, lp(0, 0, 0, 8));
+        f.addView(tv("Nomor luar negeri ditulis dengan + dan kode negara. Nomor yang belum terdaftar tetap bisa disimpan, tapi baru bisa dichat setelah orangnya daftar.", 13, c(R.color.sub), false), lp(0, 0, 0, 8));
+        final TextView er = tv(err == null ? "" : err, 13, c(R.color.error), false);
+        f.addView(er, lp(0, 0, 0, 8));
+        final Button b = button("Simpan");
+        b.setOnClickListener(x -> {
+            b.setEnabled(false);
+            er.setText("");
+            Api.call("POST", "contacts", token, json("phone", ph.getText().toString().trim(), "name", nm.getText().toString().trim()), (cd, j, net) -> ui(() -> {
+                b.setEnabled(true);
+                if (down(j, net)) er.setText(DOWN);
+                else if (cd == 200) {
+                    String p = j.optString("phone");
+                    if (!contacts.contains(p)) contacts.add(p);
+                    String n = j.optString("name");
+                    if (!n.isEmpty()) names.put(p, n);
+                    if (!j.optBoolean("registered")) unreg.add(p); else unreg.remove(p);
+                    Toast.makeText(this, "Kontak tersimpan", Toast.LENGTH_SHORT).show();
+                    showList();
+                } else if (cd == 401) { clearSession(); showLogin(null); }
+                else er.setText(msg(j, "Gagal menyimpan"));
+            }));
+        });
+        f.addView(b, lp(0, 0, 0, 0));
+        l.addView(f, new LinearLayout.LayoutParams(MATCH, WRAP));
+        setScreen("addc", l);
+    }
+
+    void showStatus() {
+        LinearLayout l = col();
+        l.addView(topBar("<", this::showList, "Status", null, null), new LinearLayout.LayoutParams(MATCH, WRAP));
+        LinearLayout row = new LinearLayout(this);
+        row.setPadding(dp(10), dp(10), dp(10), dp(6));
+        Button tx = button("Status teks");
+        tx.setOnClickListener(x -> statusTextDialog());
+        Button md = button("Foto / Video");
+        md.setOnClickListener(x -> pickStatusMedia());
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+        bp.rightMargin = dp(6);
+        row.addView(tx, bp);
+        row.addView(md, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        l.addView(row, new LinearLayout.LayoutParams(MATCH, WRAP));
+        ScrollView sv = new ScrollView(this);
+        LinearLayout sb = new LinearLayout(this);
+        sb.setOrientation(LinearLayout.VERTICAL);
+        sv.addView(sb, new ViewGroup.LayoutParams(MATCH, WRAP));
+        l.addView(sv, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+        setScreen("status", l);
+        stBox = sb;
+        renderStatus();
+        loadStatus();
+    }
+
+    void loadStatus() {
+        Api.call("GET", "status", token, null, (cd, j, net) -> ui(() -> {
+            if (net != null) { Toast.makeText(this, DOWN, Toast.LENGTH_SHORT).show(); return; }
+            if (cd == 401) { clearSession(); showLogin(null); return; }
+            if (cd != 200 || j == null) return;
+            statuses.clear();
+            JSONArray a = j.optJSONArray("statuses");
+            if (a != null) for (int i = 0; i < a.length(); i++) { JSONObject s = a.optJSONObject(i); if (s != null) statuses.add(s); }
+            renderStatus();
+        }));
+    }
+
+    void renderStatus() {
+        if (stBox == null || !screen.equals("status")) return;
+        stBox.removeAllViews();
+        if (statuses.isEmpty()) {
+            TextView t = tv("Belum ada status. Posting teks, foto, atau video. Status hilang setelah 24 jam dan hanya terlihat oleh kontak yang saling menyimpan nomor.", 14, c(R.color.sub), false);
+            t.setPadding(dp(16), dp(24), dp(16), dp(24));
+            stBox.addView(t);
+            return;
+        }
+        for (final JSONObject s : statuses) {
+            final boolean mine = s.optString("owner").equals(me);
+            final String who = mine ? "Status saya" : nameOf(s.optString("owner"));
+            String kind = s.optString("kind");
+            JSONObject file = s.optJSONObject("file");
+            LinearLayout r = new LinearLayout(this);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(dp(14), dp(10), dp(14), dp(10));
+            r.setBackground(box(c(R.color.bg), c(R.color.line)));
+            View th;
+            if (kind.equals("image") && file != null) {
+                ImageView iv = new ImageView(this);
+                iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                iv.setBackgroundColor(0x22000000);
+                th = iv;
+                Xfer.loadImage(this, token, file.optString("id"), iv, dp(56));
+            } else {
+                TextView tt = tv(kind.equals("video") ? "\u25B6" : "Aa", 18, 0xFFFFFFFF, true);
+                tt.setGravity(Gravity.CENTER);
+                tt.setBackgroundColor(kind.equals("video") ? 0xFF111111 : BG[Math.abs(s.optInt("bg")) % BG.length]);
+                th = tt;
+            }
+            r.addView(th, new LinearLayout.LayoutParams(dp(56), dp(56)));
+            LinearLayout tx = new LinearLayout(this);
+            tx.setOrientation(LinearLayout.VERTICAL);
+            tx.setPadding(dp(12), 0, 0, 0);
+            tx.addView(tv(who, 16, c(R.color.text), true));
+            String desc = kind.equals("text") ? s.optString("text") : (kind.equals("image") ? "Foto" : "Video");
+            if (desc.length() > 40) desc = desc.substring(0, 40) + "...";
+            tx.addView(tv(timeAgo(s.optLong("ts")) + "  -  " + desc, 13, c(R.color.sub), false));
+            r.addView(tx, new LinearLayout.LayoutParams(0, WRAP, 1f));
+            r.setOnClickListener(x -> viewer(who, s.optJSONObject("file"), s.optString("text"), s.optInt("bg"), mine ? s.optString("id") : null));
+            stBox.addView(r, new LinearLayout.LayoutParams(MATCH, WRAP));
+        }
+    }
+
+    void statusTextDialog() {
+        stBg = 0;
+        final EditText in = new EditText(this);
+        in.setHint("Tulis status...");
+        in.setMinLines(4);
+        in.setGravity(Gravity.TOP);
+        in.setTextColor(0xFFFFFFFF);
+        in.setHintTextColor(0xAAFFFFFF);
+        in.setTextSize(20);
+        in.setBackgroundColor(BG[0]);
+        in.setPadding(dp(16), dp(16), dp(16), dp(16));
+        in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(12), dp(8), dp(12), dp(8));
+        wrap.addView(in, new LinearLayout.LayoutParams(MATCH, WRAP));
+        Button cb = button("Ganti warna");
+        cb.setOnClickListener(x -> { stBg = (stBg + 1) % BG.length; in.setBackgroundColor(BG[stBg]); });
+        wrap.addView(cb, lp(0, 8, 0, 0));
+        new android.app.AlertDialog.Builder(this).setTitle("Status teks").setView(wrap)
+            .setPositiveButton("Posting", (d, w) -> {
+                String t = in.getText().toString().trim();
+                if (t.isEmpty()) return;
+                JSONObject b = json("text", t);
+                try { b.put("bg", stBg); } catch (JSONException e) {}
+                Api.call("POST", "status/text", token, b, (cd, j, net) -> ui(() -> {
+                    if (down(j, net)) Toast.makeText(this, DOWN, Toast.LENGTH_SHORT).show();
+                    else if (cd != 200) Toast.makeText(this, msg(j, "Gagal posting"), Toast.LENGTH_SHORT).show();
+                    else loadStatus();
+                }));
+            }).setNegativeButton("Batal", null).show();
+    }
+
+    void pickStatusMedia() {
+        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(android.content.Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+        startActivityForResult(i, 79);
+    }
+
+    View fileBubble(final JSONObject f, boolean mine, int maxW) {
+        final String mime = f.optString("mime");
+        int tc = mine ? 0xFFFFFFFF : c(R.color.text);
+        LinearLayout b = new LinearLayout(this);
+        b.setOrientation(LinearLayout.VERTICAL);
+        b.setBackground(box(c(mine ? R.color.bubble_me : R.color.bubble_other), 0));
+        b.setPadding(dp(4), dp(4), dp(4), dp(4));
+        int w = Math.min(maxW, dp(240));
+        if (mime.startsWith("image/")) {
+            ImageView iv = new ImageView(this);
+            iv.setAdjustViewBounds(true);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setMinimumHeight(dp(120));
+            iv.setBackgroundColor(0x22000000);
+            b.addView(iv, new LinearLayout.LayoutParams(w, WRAP));
+            Xfer.loadImage(this, token, f.optString("id"), iv, w);
+            b.setOnClickListener(x -> viewer(f.optString("name"), f, null, 0, null));
+        } else if (mime.startsWith("video/")) {
+            TextView pv = tv("\u25B6", 40, 0xFFFFFFFF, true);
+            pv.setGravity(Gravity.CENTER);
+            pv.setBackgroundColor(0xFF111111);
+            b.addView(pv, new LinearLayout.LayoutParams(w, w * 9 / 16));
+            TextView cap = tv(f.optString("name") + "\n" + Xfer.size(f.optLong("size")), 13, tc, false);
+            cap.setPadding(dp(6), dp(4), dp(6), dp(2));
+            cap.setMaxWidth(w);
+            b.addView(cap);
+            b.setOnClickListener(x -> viewer(f.optString("name"), f, null, 0, null));
+        } else {
+            TextView t = tv("File: " + f.optString("name") + "\n" + Xfer.size(f.optLong("size")) + "  -  ketuk untuk unduh", 15, tc, false);
+            t.setPadding(dp(8), dp(6), dp(8), dp(6));
+            t.setMaxWidth(w);
+            b.addView(t);
+            b.setOnClickListener(x -> Xfer.download(MainActivity.this, token, f));
+        }
+        return b;
+    }
+
+    void viewer(String title, final JSONObject f, String text, int bg, final String delId) {
+        final android.app.Dialog d = new android.app.Dialog(this, android.R.style.Theme_Material_NoActionBar_Fullscreen);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(0xFF000000);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(0xFF111111);
+        bar.setPadding(dp(14), dp(12), dp(14), dp(12));
+        TextView close = tv("Tutup", 15, 0xFFFFFFFF, true);
+        close.setPadding(0, 0, dp(16), 0);
+        close.setOnClickListener(x -> d.dismiss());
+        bar.addView(close);
+        bar.addView(tv(title, 16, 0xFFFFFFFF, true), new LinearLayout.LayoutParams(0, WRAP, 1f));
+        if (f != null) {
+            TextView dl = tv("Unduh", 15, 0xFFFFFFFF, false);
+            dl.setOnClickListener(x -> Xfer.download(MainActivity.this, token, f));
+            bar.addView(dl);
+        }
+        if (delId != null) {
+            TextView del = tv("   Hapus", 15, 0xFFFF8A80, false);
+            del.setOnClickListener(x -> Api.call("POST", "status/delete", token, json("id", delId), (cd, j, net) -> ui(() -> { d.dismiss(); loadStatus(); })));
+            bar.addView(del);
+        }
+        root.addView(bar, new LinearLayout.LayoutParams(MATCH, WRAP));
+        FrameLayout body = new FrameLayout(this);
+        root.addView(body, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+        String mime = f != null ? f.optString("mime") : "";
+        if (f == null) {
+            body.setBackgroundColor(BG[Math.abs(bg) % BG.length]);
+            TextView t = tv(text == null ? "" : text, 24, 0xFFFFFFFF, true);
+            t.setGravity(Gravity.CENTER);
+            t.setPadding(dp(24), dp(24), dp(24), dp(24));
+            body.addView(t, new FrameLayout.LayoutParams(MATCH, MATCH));
+        } else if (mime.startsWith("video/")) {
+            final VideoView vv = new VideoView(this);
+            FrameLayout.LayoutParams vp = new FrameLayout.LayoutParams(MATCH, MATCH);
+            vp.gravity = Gravity.CENTER;
+            body.addView(vv, vp);
+            android.widget.MediaController mc = new android.widget.MediaController(this);
+            mc.setAnchorView(vv);
+            vv.setMediaController(mc);
+            vv.setVideoURI(Uri.parse(Api.base() + "/api/file/" + f.optString("id") + "?token=" + Uri.encode(token)));
+            vv.setOnPreparedListener(mp -> vv.start());
+            vv.setOnErrorListener((mp, what, extra) -> { Toast.makeText(this, "Video tidak bisa diputar", Toast.LENGTH_LONG).show(); return true; });
+            d.setOnDismissListener(x -> vv.stopPlayback());
+        } else if (mime.startsWith("image/")) {
+            ImageView iv = new ImageView(this);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            body.addView(iv, new FrameLayout.LayoutParams(MATCH, MATCH));
+            Xfer.loadImage(this, token, f.optString("id"), iv, getResources().getDisplayMetrics().widthPixels);
+        }
+        if (f != null && text != null && !text.isEmpty()) {
+            TextView cp = tv(text, 15, 0xFFFFFFFF, false);
+            cp.setBackgroundColor(0x99000000);
+            cp.setPadding(dp(14), dp(10), dp(14), dp(10));
+            FrameLayout.LayoutParams cl = new FrameLayout.LayoutParams(MATCH, WRAP);
+            cl.gravity = Gravity.BOTTOM;
+            body.addView(cp, cl);
+        }
+        d.setContentView(root);
+        d.show();
+    }
+
     void pick() {
         android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
@@ -464,6 +812,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int req, int res, android.content.Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == 79 && res == RESULT_OK && data != null && data.getData() != null) { Xfer.uploadStatus(this, token, data.getData()); return; }
         if (req == 77 && res == RESULT_OK && data != null && data.getData() != null && !cur.isEmpty())
             Xfer.upload(this, token, cur, data.getData());
     }

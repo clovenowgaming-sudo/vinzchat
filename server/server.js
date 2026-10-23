@@ -13,10 +13,44 @@ const { pipeline } = require('stream/promises');
 const { Transform } = require('stream');
 const UP_DIR = path.join(__dirname, 'uploads');
 const MAX_UP = (+process.env.MAX_UPLOAD_MB || 25) * 1048576;
+const cleanName = s => path.basename(String(s || 'file')).replace(/[^\w.\- ()]/g, '_').slice(0, 100) || 'file';
+function statusVisible(owner, viewer) {
+  if (owner === viewer) return true;
+  return (db.contacts[owner] || []).includes(viewer) && (db.contacts[viewer] || []).includes(owner);
+}
+function fileAccess(fid, me) {
+  const m = db.messages.find(x => x.file && x.file.id === fid);
+  if (m) return (m.from === me || m.to === me) ? m.file : null;
+  const s = db.statuses.find(x => x.file && x.file.id === fid);
+  if (s && statusVisible(s.owner, me)) return s.file;
+  return null;
+}
+async function recvFile(req) {
+  const len = +req.headers['content-length'] || 0;
+  if (!len || len > MAX_UP) throw new Error('size');
+  const id = crypto.randomUUID();
+  fs.mkdirSync(UP_DIR, { recursive: true });
+  const fp = path.join(UP_DIR, id);
+  let size = 0;
+  const cap = new Transform({ transform(ch, enc, cb) { size += ch.length; size > MAX_UP ? cb(new Error('too big')) : cb(null, ch); } });
+  try { await pipeline(req, cap, fs.createWriteStream(fp)); } catch (e) { fs.unlink(fp, () => {}); throw e; }
+  return { id, size };
+}
+setInterval(() => {
+  const cut = Date.now() - 24 * 3600e3;
+  const keep = [];
+  for (const s of db.statuses) {
+    if (s.ts > cut) keep.push(s);
+    else if (s.file) fs.unlink(path.join(UP_DIR, s.file.id), () => {});
+  }
+  if (keep.length !== db.statuses.length) { db.statuses = keep; save(); }
+}, 1800e3);
 
 // ---------- storage (JSON file, atomic write) ----------
 let db = { users: {}, sessions: {}, contacts: {}, messages: [] };
 try { db = Object.assign(db, JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))); } catch {}
+db.names = db.names || {};
+db.statuses = db.statuses || [];
 let saveT = null;
 function save() {
   clearTimeout(saveT);
@@ -43,8 +77,9 @@ function normPhone(p) {
   if (p.startsWith('08')) p = '+62' + p.slice(1);
   else if (/^\d/.test(p)) p = '+' + p;
   if (!/^\+\d{8,15}$/.test(p)) return null;
-  const cc = CCS.find(c => p.startsWith('+' + c));
-  if (!cc) return null;
+  const any = CCS.includes('*');
+  const cc = any ? '' : CCS.find(c => p.startsWith('+' + c));
+  if (!any && !cc) return null;
   return { phone: p, cc, national: p.slice(1 + cc.length) };
 }
 
@@ -147,6 +182,61 @@ const server = http.createServer(async (req, res) => {
     const me = authPhone(req, url);
     if (!me) return json(res, 401, { error: 'Belum login' });
 
+    if (req.method === 'GET' && url.pathname === '/api/contacts') {
+      const nm = db.names[me] = db.names[me] || {};
+      const phones = db.contacts[me] || [];
+      return json(res, 200, { contacts: phones, list: phones.map(p => ({ phone: p, name: nm[p] || '', registered: !!db.users[p] })) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/contacts') {
+      if (!hit('addc:' + me, 60, 3600e3)) return json(res, 429, { error: 'Terlalu banyak percobaan' });
+      const b = await body(req);
+      const n = normPhone(b.phone);
+      if (!n || n.phone === me) return json(res, 400, { error: 'Nomor tidak valid (luar negeri pakai + dan kode negara)' });
+      const name = String(b.name || '').trim().slice(0, 40);
+      const list = db.contacts[me] = db.contacts[me] || [];
+      if (!list.includes(n.phone)) list.push(n.phone);
+      const nm = db.names[me] = db.names[me] || {};
+      if (name) nm[n.phone] = name;
+      save();
+      return json(res, 200, { phone: n.phone, name: nm[n.phone] || '', registered: !!db.users[n.phone] });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/status') {
+      const cut = Date.now() - 24 * 3600e3;
+      const list = db.statuses.filter(s => s.ts > cut && statusVisible(s.owner, me)).sort((a, b) => b.ts - a.ts);
+      return json(res, 200, { statuses: list });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/status/text') {
+      if (!hit('st:' + me, 30, 3600e3)) return json(res, 429, { error: 'Terlalu banyak status, coba lagi nanti' });
+      const b = await body(req);
+      const text = String(b.text || '').trim().slice(0, 500);
+      if (!text) return json(res, 400, { error: 'Teks kosong' });
+      db.statuses.push({ id: crypto.randomUUID(), owner: me, kind: 'text', text, bg: Math.abs(+b.bg || 0) % 6, ts: Date.now() });
+      save();
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/status/media') {
+      if (!hit('st:' + me, 30, 3600e3)) return json(res, 429, { error: 'Terlalu banyak status, coba lagi nanti' });
+      const name = cleanName(url.searchParams.get('name'));
+      const mime = String(url.searchParams.get('type') || '').slice(0, 100);
+      if (!/^(image|video)\//.test(mime)) return json(res, 400, { error: 'Status hanya foto atau video' });
+      let r;
+      try { r = await recvFile(req); }
+      catch (e) { return json(res, 413, { error: 'Upload gagal atau lebih dari ' + Math.floor(MAX_UP / 1048576) + ' MB' }); }
+      db.statuses.push({ id: crypto.randomUUID(), owner: me, kind: mime.startsWith('video/') ? 'video' : 'image', text: '', file: { id: r.id, name, mime, size: r.size }, ts: Date.now() });
+      save();
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/status/delete') {
+      const b = await body(req);
+      const i = db.statuses.findIndex(s => s.id === b.id && s.owner === me);
+      if (i < 0) return json(res, 404, { error: 'Status tidak ditemukan' });
+      const [s] = db.statuses.splice(i, 1);
+      if (s.file) fs.unlink(path.join(UP_DIR, s.file.id), () => {});
+      save();
+      return json(res, 200, { ok: true });
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/upload') {
       const to = normPhone(url.searchParams.get('to'));
       const name = path.basename(String(url.searchParams.get('name') || 'file')).replace(/[^\w.\- ()]/g, '_').slice(0, 100) || 'file';
@@ -173,12 +263,21 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname.startsWith('/api/file/')) {
       const fid = path.basename(url.pathname.slice(10));
-      const m = db.messages.find(x => x.file && x.file.id === fid);
-      if (!m || (m.from !== me && m.to !== me)) return json(res, 404, { error: 'File tidak ditemukan' });
+      const ff = fileAccess(fid, me);
+      if (!ff) return json(res, 404, { error: 'File tidak ditemukan' });
       const fp = path.join(UP_DIR, fid);
       return fs.stat(fp, (e, st) => {
         if (e) return json(res, 404, { error: 'File sudah dihapus' });
-        res.writeHead(200, { 'Content-Type': m.file.mime, 'Content-Length': st.size, 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(m.file.name) });
+        const hdr = { 'Content-Type': ff.mime, 'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(ff.name) };
+        const rg = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+        if (rg && (rg[1] || rg[2])) {
+          const s0 = rg[1] ? +rg[1] : Math.max(0, st.size - +rg[2]);
+          const e0 = rg[1] && rg[2] ? Math.min(+rg[2], st.size - 1) : st.size - 1;
+          if (s0 >= st.size || s0 > e0) { res.writeHead(416, { 'Content-Range': 'bytes */' + st.size }); return res.end(); }
+          res.writeHead(206, { ...hdr, 'Content-Range': 'bytes ' + s0 + '-' + e0 + '/' + st.size, 'Content-Length': e0 - s0 + 1 });
+          return fs.createReadStream(fp, { start: s0, end: e0 }).pipe(res);
+        }
+        res.writeHead(200, { ...hdr, 'Content-Length': st.size });
         fs.createReadStream(fp).pipe(res);
       });
     }
